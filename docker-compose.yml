@@ -1,0 +1,182 @@
+version: '3'
+
+services:
+
+  alb:
+    image: nginx:latest
+    restart: always
+    networks:
+      buildnet:
+        ipv4_address: "172.50.0.2"    
+    ports:
+      - 80:80
+      - 443:443    
+    volumes:
+      - keystore:/var/tls/:ro
+      - ./nginx/:/etc/nginx/:ro
+      - ./certbot/conf/:/var/ssl/:ro
+
+  gitea-server:
+    image: gitea/gitea:latest
+    restart: always
+    networks:
+      buildnet:
+        ipv4_address: "172.50.0.100"
+    volumes:
+      - gitea:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+      - keystore:/var/tls/:ro
+    environment:
+      - GITEA__database__DB_TYPE=mysql
+      - GITEA__database__HOST=gitea-db:3306
+      - GITEA__database__NAME=gitea
+      - GITEA__database__USER=gitea
+      - GITEA__database__PASSWD=gitea
+      - GITEA__webhook__ALLOWED_HOST_LIST=*
+      - GITEA__server__ROOT_URL=https://git.zush.dev
+      - GITEA__server__DOMAIN=https://git.zush.dev
+      - GITEA__server__HTTP_PORT=3030
+    ports:
+      - "3001:3000"
+      - "27922:22"
+    links:
+      - gitea-db
+    depends_on:
+        gitea-db:
+          condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    extra_hosts:
+      - "git.zush.dev:172.50.0.2"
+      - "build.zush.dev:172.50.0.2"
+      - "build-grpc.zush.dev:172.50.0.2"          
+
+  woodpecker-server:
+    image: woodpeckerci/woodpecker-server:next
+    ports:
+      - 8000:8000
+      - 9000:9000
+    networks:
+      buildnet:
+        ipv4_address: "172.50.0.110"
+    volumes:
+      - woodpecker-server-data:/var/lib/woodpecker/
+      - /var/run/docker.sock:/var/run/docker.sock
+      - keystore:/var/tls/:ro
+    environment:
+      - WOODPECKER_OPEN=true
+      - WOODPECKER_HOST=https://build.zush.dev
+      - WOODPECKER_GITEA=true
+      - WOODPECKER_GITEA_URL=${WOODPECKER_GITEA_URL}
+      - WOODPECKER_GITEA_CLIENT=${WOODPECKER_GITEA_CLIENT}
+      - WOODPECKER_GITEA_SECRET=${WOODPECKER_GITEA_SECRET}
+      - WOODPECKER_AGENT_SECRET=${WOODPECKER_AGENT_SECRET}
+      - WOODPECKER_LETS_ENCRYPT=false
+      - WOODPECKER_DATABASE_DRIVER=mysql
+      - WOODPECKER_DATABASE_DATASOURCE=${WOODPECKER_DSN}
+      - WOODPECKER_DEBUG=true
+      - WOODPECKER_ADMIN=mike
+    links:
+      - woodpecker-db
+      - gitea-server
+    depends_on:
+      woodpecker-db:
+        condition: service_healthy
+    healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:8000"]
+        interval: 30s
+        timeout: 10s
+        retries: 5
+    extra_hosts:
+      - "git.zush.dev:172.50.0.2"
+      - "build.zush.dev:172.50.0.2"
+      - "build-grpc.zush.dev:172.50.0.2"
+
+  woodpecker-agent:
+    image: woodpeckerci/woodpecker-agent:next
+    command: agent
+    restart: always
+    depends_on:
+      - woodpecker-server
+      - gitea-server
+    networks:
+      buildnet:
+        ipv4_address: "172.50.0.111"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - keystore:/var/tls/:ro
+    environment:
+      - WOODPECKER_SERVER=172.50.0.110:9000
+      - WOODPECKER_AGENT_SECRET=${WOODPECKER_AGENT_SECRET}
+      - WOODPECKER_LOG_LEVEL=trace
+      - WOODPECKER_MAX_PROCS=4
+    links:
+      - gitea-server
+    extra_hosts:
+      - "git.zush.dev:172.50.0.2"
+      - "build.zush.dev:172.50.0.2"
+      - "build-grpc.zush.dev:172.50.0.2"
+
+  woodpecker-db:
+    image: mysql:8
+    restart: always
+    networks:
+      buildnet:
+        ipv4_address: "172.50.0.11"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_USER=woodpecker
+      - MYSQL_PASSWORD=woodpecker
+      - MYSQL_DATABASE=woodpecker
+    volumes:
+      - woodpecker-db:/var/lib/mysql
+    healthcheck:
+        test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost"]
+        timeout: 20s
+        retries: 10
+
+  gitea-db:
+    image: mysql:8
+    restart: always
+    networks:
+      buildnet:
+        ipv4_address: "172.50.0.10"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_USER=gitea
+      - MYSQL_PASSWORD=gitea
+      - MYSQL_DATABASE=gitea
+    volumes:
+      - gitea-db:/var/lib/mysql
+    healthcheck:
+        test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost"]
+        timeout: 20s
+        retries: 10
+
+  certbot:
+    image: certbot/certbot:latest
+    networks:
+      buildnet:
+        ipv4_address: "172.50.0.3"        
+    volumes:
+      - keystore:/var/tls/:rw
+      - ./certbot/www/:/var/www/certbot/:rw
+      - ./certbot/conf/:/etc/letsencrypt/:rw
+
+volumes:
+  keystore:
+  woodpecker-server-data:
+  woodpecker-db:
+  gitea:
+  gitea-db:
+
+networks:
+  buildnet:
+    ipam: 
+      config:
+        - subnet: "172.50.0.0/24"
+          gateway: "172.50.0.1"
